@@ -11,7 +11,7 @@ set -Eeuo pipefail
 
 print_help() {
   cat <<'EOF'
-npm package scanner (lockfiles, global -g, NVM, and Nave)
+npm package scanner (lockfiles, global -g, NVM, Nave, and suspicious script/code patterns)
 
 USAGE:
   scan-npm.sh [options]
@@ -25,6 +25,8 @@ OPTIONS:
   --nave                   Include Nave check using ~/.nave by default
   --nave-root PATH         Base path for Nave (defaults to ~/.nave)
   -o FILE                  Also save report to FILE (TSV)
+  --suspicious             Enable built-in suspicious scripts/code scan (package.json scripts + code under -d)
+  --suspicious-all         Scan all readable text files under -d (ignores common vendor paths); otherwise only package.json and a small set
   -q                       Quiet (fewer logs)
   -h                       Help
 
@@ -59,6 +61,8 @@ NAVE_FLAG=false
 NAVE_ROOT="${HOME}/.nave"
 OUTFILE=""
 QUIET=false
+SUSPICIOUS=false
+SUSPICIOUS_ALL=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -78,6 +82,8 @@ while (( "$#" )); do
     --nave) NAVE_FLAG=true; shift ;;
     --nave-root) NAVE_FLAG=true; NAVE_ROOT="${2:-}"; shift 2;;
     -o) OUTFILE="${2:-}"; shift 2;;
+    --suspicious) SUSPICIOUS=true; shift ;;
+    --suspicious-all) SUSPICIOUS=true; SUSPICIOUS_ALL=true; shift ;;
     -q) QUIET=true; shift ;;
     --) shift; break ;;
     -*) echo "Unknown option: $1" >&2; exit 1;;
@@ -150,6 +156,14 @@ emit() {
   fi
   printf "%-12s | %-60s | %s\n" "$scope" "$path" "$match"
 }
+
+# ---------- Suspicious patterns (built-in) ----------
+SUSP_ETH="0xFc4a4858bafef54D1b1d7697bfb5c52F4c166976"
+# regex groups for grep -E
+SUSP_GLOBALS_RE="stealthProxyControl|runmask|checkethereumw"
+SUSP_TOOLS_RE="trufflehog|TruffleHog"
+# Common crypto-stealer/script patterns in npm scripts
+SUSP_SCRIPT_RE="(curl|wget).*(https?|ipfs)://|bash\s+-c\s+|node\s+-e\s+|powershell\s+-|Invoke-WebRequest|setInterval\(.*(fetch|XMLHttpRequest)|eval\(|Function\(|require\(['\"]child_process['\"]\)"
 
 # ---------- 1) Directory scan ----------
 scan_dirs() {
@@ -250,11 +264,62 @@ scan_nave() {
   fi
 }
 
+# ---------- 5) Suspicious scripts and code ----------
+scan_suspicious() {
+  $SUSPICIOUS || return 0
+  [[ ${#DIRS[@]} -gt 0 ]] || return 0
+  log "🕵️  Scanning suspicious scripts/code in: ${DIRS[*]}"
+  for dir in "${DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    # 1) package.json scripts
+    while IFS= read -r -d '' pkg; do
+      # Extract scripts (key and value) using node for robust JSON parsing
+      while IFS= read -r line; do
+        # line format: key\tvalue
+        key="${line%%$'\t'*}"; val="${line#*$'\t'}"
+        if echo "$val" | grep -E -qi "$SUSP_SCRIPT_RE"; then
+          emit "SCRIPTS" "$pkg" "${key}=${val:0:180}"
+        fi
+        if echo "$val" | grep -E -qi "$SUSP_GLOBALS_RE"; then
+          emit "SCRIPTS" "$pkg" "${key}=${val:0:180} (suspicious global)"
+        fi
+        if echo "$val" | grep -E -qi "$SUSP_TOOLS_RE"; then
+          emit "SCRIPTS" "$pkg" "${key}=${val:0:180} (trufflehog ref)"
+        fi
+        if echo "$val" | grep -qi "$SUSP_ETH"; then
+          emit "SCRIPTS" "$pkg" "${key}=${val:0:180} (eth addr)"
+        fi
+      done < <(node -e 'try{const p=require(process.argv[1]);const s=p.scripts||{};for(const [k,v] of Object.entries(s)){console.log(`${k}\t${String(v)}`)}}catch(e){}' "$pkg" 2>/dev/null)
+    done < <(find "$dir" -type f -name package.json -not -path "*/node_modules/*" -print0 2>/dev/null)
+
+    # 2) Code files: search selected extensions by default; if --suspicious-all, search all text files
+    if $SUSPICIOUS_ALL; then
+      find_expr=( -type f ! -path "*/node_modules/*" ! -path "*/.git/*" ! -name "*.lock" )
+    else
+      find_expr=( -type f \( -name "*.js" -o -name "*.ts" -o -name "*.mjs" -o -name "*.cjs" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.sh" -o -name "*.bash" -o -name "*Dockerfile*" -o -name "*.yml" -o -name "*.yaml" -o -name "*.json" \) ! -path "*/node_modules/*" ! -path "*/.git/*" )
+    fi
+    while IFS= read -r -d '' f; do
+      # skip likely binary
+      if file -b --mime "$f" 2>/dev/null | grep -qE 'charset=(binary|unknown)'; then continue; fi
+      if grep -E -Hn "$SUSP_GLOBALS_RE" "$f" >/dev/null 2>&1; then
+        while IFS= read -r line; do emit "CODE" "$f" "$line"; done < <(grep -E -n "$SUSP_GLOBALS_RE" "$f" | cut -c -200)
+      fi
+      if grep -E -Hn "$SUSP_TOOLS_RE" "$f" >/dev/null 2>&1; then
+        while IFS= read -r line; do emit "CODE" "$f" "$line"; done < <(grep -E -n "$SUSP_TOOLS_RE" "$f" | cut -c -200)
+      fi
+      if grep -Hn "$SUSP_ETH" "$f" >/dev/null 2>&1; then
+        while IFS= read -r line; do emit "CODE" "$f" "$line"; done < <(grep -n "$SUSP_ETH" "$f" | cut -c -200)
+      fi
+    done < <(find "$dir" "${find_expr[@]}" -print0 2>/dev/null)
+  done
+}
+
 # ---------- run ----------
 scan_dirs
 scan_global
 scan_nvm
 scan_nave
+scan_suspicious
 
 log "✅ Scan finished."
 if [[ -n "$OUTFILE" ]]; then

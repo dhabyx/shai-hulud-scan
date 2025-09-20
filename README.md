@@ -49,6 +49,8 @@ Key options:
 - --nave Include Nave installations.
 - --nave-root PATH Base directory for Nave (defaults to ~/.nave).
 - -o FILE Save results as TSV to FILE in addition to console output.
+- --suspicious Enable built-in suspicious scripts/code scan (package.json scripts + code under -d)
+- --suspicious-all Scan all readable text files under -d (ignores common vendor paths); otherwise only package.json and a small set
 - -q Quiet logging (reduces non-essential logs).
 - -h Show help.
 
@@ -59,6 +61,13 @@ Key options:
 - NVM: any package.json under `$NVM_DIR/versions/node/*/lib/node_modules/*/package.json`
 - Nave: any package.json under `~/.nave/installed/*/lib/node_modules/*/package.json` and a few generic
   `*/node_modules/*/package.json` paths under `installed/`
+  - Note: This matches both version directories (e.g., 22.19.0) and named environments (e.g., "mifos", "ui4p"). If your Nave root is custom, use `--nave-root /path/to/.nave`.
+- Suspicious scripts/code (if --suspicious):
+  - package.json scripts containing crypto-stealer patterns (curl|wget piping, child_process, eval/Function, etc.)
+  - suspicious globals: stealthProxyControl, runmask, checkethereumw
+  - TruffleHog references
+  - Ethereum address: 0xFc4a4858bafef54D1b1d7697bfb5c52F4c166976
+  - By default scans common text/code extensions outside node_modules; use --suspicious-all to widen
 
 ## Output
 
@@ -104,6 +113,9 @@ information becomes available.
 - NVM/Nave not detected: Ensure the base directories exist or pass explicit paths (--nvm=/path, --nave-root /path).
 - No matches: Verify the exact package@version pairs in your IoC list. The script matches exact strings in lockfiles and
   derived name@version strings for global scans.
+
+## Changelog
+- 2025-09-19: added optional suspicious scripts/code scanning (--suspicious, --suspicious-all)
 
 ## License
 MIT License
